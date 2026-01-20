@@ -1,0 +1,53 @@
+MODEL:
+  TYPE: 
+  NAME: eva02_l
+  PRETRAIN_PATH: '/home/jin/code/MADE/weights/eva02_large_patch14_clip_224/open_clip_model.safetensors'
+  META_DIMS: [ 105, ]
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  MASK_META: False
+  ADD_META: False
+  DIST_TRAIN: False
+  ADD_TEXT: False
+  TEXT_DIMS: [ 512, ]
+  TEXT:
+    METHOD: "cocoop"
+    CLIP_NAME: ''
+    N_CTX: 32
+    ENABLE_MASK: True
+    ATTN_MASK_RATIO: 0.5
+    ENABLE_RESID_PORT: False
+    TEMP: 0.07
+    ITC_W: 0.005
+    RESID_W: 0.0
+    ORTH_W: 0.0
+
+DATA:
+  IMG_HEIGHT: 224
+  IMG_WIDTH: 224
+  DATASET: 'last'
+  RANDOM_NOISE: False
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 60
+  BASE_LR: 2e-5
+  WARMUP_METHOD: 'linear'
+  LARGE_FC_LR: False
+  CHECKPOINT_PERIOD: 60
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  0.05
+  WEIGHT_DECAY_BIAS: 0.05
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  WEIGHT: ''
+  FEAT_NORM: 'yes'
+  TYPE: 'image_only'
+OUTPUT_DIR: '../MADE/logs/last/no_text'
+
+
