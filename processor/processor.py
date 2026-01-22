@@ -62,6 +62,14 @@ def do_train(cfg,
     start_train_time = time.time()
     # train
     for epoch in range(cfg.TRAIN.START_EPOCH, epochs + 1):
+        if hasattr(model, "module"):
+            m = model.module
+        else:
+            m = model
+        if hasattr(m, "cur_epoch"):
+            m.cur_epoch = epoch
+            m.total_epoch = cfg.SOLVER.MAX_EPOCHS
+
         if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
         start_time = time.time()
@@ -80,6 +88,20 @@ def do_train(cfg,
 
         scheduler.step(epoch)
         model.train()
+
+        # ---- let model know current epoch / total epochs (for proxy gate warmup, etc.) ----
+        core_model = model.module if hasattr(model, "module") else model
+        if hasattr(core_model, "set_total_epoch"):
+            try:
+                core_model.set_total_epoch(cfg.SOLVER.MAX_EPOCHS)
+            except Exception:
+                core_model.set_total_epoch(cfg.SOLVER.MAX_EPOCHS)
+        if hasattr(core_model, "set_epoch"):
+            try:
+                core_model.set_epoch(epoch)
+            except Exception:
+                core_model.set_epoch(epoch)
+
         for idx, data in enumerate(train_loader):
             # print(f"=== Iteration {idx} ===")
             # print(f"Type of data: {type(data)}")
@@ -150,7 +172,8 @@ def do_train(cfg,
                 else:
                     score, feat = model(samples)
 
-            loss = loss_fn(score, feat, targets, camids)
+            # loss = loss_fn(score, feat, targets, camids)
+            loss = loss_fn(score, feat, targets, camids, model=model)
             train_writer.add_scalar('loss', loss.item(), epoch)
             scaler.scale(loss).backward()
 
@@ -171,9 +194,19 @@ def do_train(cfg,
 
             torch.cuda.synchronize()
             if (idx + 1) % log_period == 0:
-                logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
+                # logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
+                #             .format(epoch, (idx + 1), len(train_loader),
+                #                     loss_meter.avg, acc_meter.avg, scheduler._get_lr(epoch)[0]))
+                extra = ""
+                if hasattr(loss_fn, "_last") and isinstance(loss_fn._last, dict):
+                    d = loss_fn._last
+                    extra = ", ID:{:.3f}, TRI:{:.3f}, PA:{:.3f}(w={:.3g})".format(
+                        d.get("id", 0.0), d.get("tri", 0.0), d.get("pa", 0.0), d.get("pa_w", 0.0)
+                    )
+                logger.info("Epoch[{}] Iteration[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}{}"
                             .format(epoch, (idx + 1), len(train_loader),
-                                    loss_meter.avg, acc_meter.avg, scheduler._get_lr(epoch)[0]))
+                                    loss_meter.avg, acc_meter.avg, scheduler._get_lr(epoch)[0], extra))
+
 
         end_time = time.time()
         time_per_batch = (end_time - start_time) / (idx + 1)

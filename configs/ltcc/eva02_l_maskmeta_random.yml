@@ -18,10 +18,10 @@ MODEL:
     CLIP_NAME: ''
     N_CTX: 32
     ENABLE_MASK: True
-    ATTN_MASK_RATIO: 0.5
+    ATTN_MASK_RATIO: 0.625
     ENABLE_RESID_PORT: False
     TEMP: 0.07
-    ITC_W: 0.005
+    ITC_W: 0.01
     RESID_W: 0.0
     ORTH_W: 0.0
 

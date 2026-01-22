@@ -45,6 +45,9 @@ from torchinfo import summary
 from .text_encoder import ResNormLayer
 from .prompt import PromptText
 from .MHSA import Mlp
+from .proxy_gate import ProxyFeatureGate
+from config import cfg
+
 
 __all__ = ['Eva']
 
@@ -522,6 +525,28 @@ class Eva(nn.Module):
         self.head_drop = nn.Dropout(drop_rate)
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+
+        # -------------------- Cosine logits (only when Proxy-Anchor is ON) --------------------
+        # 说明：Proxy-Anchor 以分类头权重作为 proxy；当 PA 启用时，把 ID 分类也切到 cosine logits，
+        # 使“同一套 proxy 系统”在 gate / PA / CE 三处一致使用方向信息。
+        self.use_cosine_logits = False
+        self.cosine_scale = 30.0
+        if cfg is not None:
+            # 优先沿用 MADE 里已有的 solver 选项（defaults.py 里有 COSINE_SCALE=30）
+            self.cosine_scale = float(getattr(getattr(cfg, "SOLVER", None), "COSINE_SCALE", 30.0))
+            # text_cfg = getattr(getattr(cfg, "MODEL", None), "TEXT", None)
+            # if (text_cfg is not None) and bool(getattr(text_cfg, "PROXY_ANCHOR_ON", False)):
+            #     self.use_cosine_logits = True
+                    # ---- cosine logits only when ProxyAnchor is actually used (W > 0) ----
+            text_cfg = getattr(cfg.MODEL, "TEXT", None)
+            proxy_anchor_on = bool(getattr(text_cfg, "PROXY_ANCHOR_ON", False)) if text_cfg is not None else False
+            proxy_anchor_w = float(getattr(text_cfg, "PROXY_ANCHOR_W", 0.0)) if text_cfg is not None else 0.0
+            self.use_cosine_logits = proxy_anchor_on and (proxy_anchor_w > 0.0)
+
+        # cosine 分类一般不使用 bias；同时避免 DDP find_unused_parameters 因 bias 未参与计算而触发额外遍历
+        if self.use_cosine_logits and isinstance(self.head, nn.Linear) and (self.head.bias is not None):
+            self.head.bias.requires_grad_(False)
+
         self.apply(self._init_weights)
         if self.pos_embed is not None:
             trunc_normal_(self.pos_embed, std=.02)
@@ -567,6 +592,28 @@ class Eva(nn.Module):
                 enable_resid_port=enable_resid_port,
             )
 
+            # -------------------- Proxy-only feature-wise keep-top + soft gate --------------------
+            self.proxy_gate = None
+            self.proxy_gate_apply = "t1,t2"
+            self.proxy_gate_warmup = 0
+            if self.add_text and cfg is not None:
+                text_cfg = getattr(cfg.MODEL, "TEXT", None)
+                if text_cfg is not None and bool(getattr(text_cfg, "PROXY_GATE_ON", False)):
+                    keep_ratio = float(getattr(text_cfg, "PROXY_KEEP_RATIO", 0.5))
+                    temp = float(getattr(text_cfg, "PROXY_GATE_TEMP", 1.0))
+                    min_gate = float(getattr(text_cfg, "PROXY_GATE_MIN", 0.0))
+                    self.proxy_gate_apply = str(getattr(text_cfg, "PROXY_GATE_APPLY", "t1,t2"))
+                    self.proxy_gate_warmup = int(getattr(text_cfg, "PROXY_GATE_WARMUP", 0))
+                    detach_proxy = bool(getattr(text_cfg, "PROXY_DETACH_PROXY", True))
+                    detach_score = bool(getattr(text_cfg, "PROXY_DETACH_SCORE", False))
+                    self.proxy_gate = ProxyFeatureGate(
+                        keep_ratio=keep_ratio,
+                        temperature=temp,
+                        min_gate=min_gate,
+                        detach_proxy=detach_proxy,
+                        detach_score=detach_score,
+                    )
+
         if self.add_text:
             #             assert len(text_dims)==extra_token_num-1
             assert self.text_dims is not None and len(self.text_dims) >= 1
@@ -582,8 +629,8 @@ class Eva(nn.Module):
                     nn.LayerNorm(embed_dim),
                     ResNormLayer(embed_dim),
                 ) if text_dim > 0 else nn.Identity()
-            setattr(self, f"text_{ind + 1}_head_1", text_head_1)
-            setattr(self, f"text_{ind + 1}_head_2", text_head_2)
+                setattr(self, f"text_{ind + 1}_head_1", text_head_1)
+                setattr(self, f"text_{ind + 1}_head_2", text_head_2)
         self.cl_0_fc = nn.Sequential(*[Mlp(in_features=embed_dim, out_features=embed_dim),
                                        nn.LayerNorm(embed_dim)])
         self.cl_1_fc = nn.Sequential(*[Mlp(in_features=embed_dim, out_features=embed_dim),
@@ -619,6 +666,18 @@ class Eva(nn.Module):
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
         self.grad_checkpointing = enable
+
+    @torch.jit.ignore
+    def set_epoch(self, epoch: int):
+        """Allow external trainer to set current epoch (1-based)."""
+        try:
+            self.cur_epoch = int(epoch)
+        except Exception:
+            self.cur_epoch = epoch
+
+    @torch.jit.ignore
+    def set_total_epoch(self, total_epoch: int):
+        self.total_epoch = int(total_epoch)
 
     @torch.jit.ignore
     def group_matcher(self, coarse=False):
@@ -725,6 +784,33 @@ class Eva(nn.Module):
                 text_head_2 = getattr(self, f"text_{ind + 1}_head_2")
                 t1 = text_head_1(cur_text).reshape(B, -1, self.embed_dim)  # [B,1,embed_dim]  (512->1024 在这里发生)
                 t2 = text_head_2(cur_text).reshape(B, -1, self.embed_dim)  # [B,1,embed_dim]
+
+                warm = int(getattr(getattr(cfg.MODEL, "TEXT", None), "PROXY_GATE_WARMUP", 0)) if cfg is not None else 0
+                if self.cur_epoch >= 0 and self.cur_epoch < warm:
+                    # skip gate in warmup
+                    pass
+                else:
+                    # do gate
+                    # Proxy-only feature-wise keep-top + soft gate (training only, requires PID)
+                    # if self.proxy_gate is not None and self.training and pids is not None:
+                    if (
+                        self.proxy_gate is not None
+                        and self.training
+                        and pids is not None
+                        and isinstance(self.head, nn.Linear)
+                        and (self.proxy_gate_warmup <= 0 or self.cur_epoch >= self.proxy_gate_warmup)
+                    ):
+                        head_w = getattr(self.head, "weight", None)
+                        if head_w is not None and head_w.dim() == 2:
+                            proxy = head_w.index_select(0, pids.to(head_w.device)).to(t1.device)
+                            apply = self.proxy_gate_apply
+                            if "t1" in apply:
+                                t1 = self.proxy_gate(t1, proxy)
+                            if "t2" in apply:
+                                t2 = self.proxy_gate(t2, proxy)
+
+
+
                 extra_tokens_1.append(t1)
                 extra_tokens_2.append(t2)
             x = x[:, 1:, :]
@@ -767,6 +853,7 @@ class Eva(nn.Module):
             cls = torch.cat((cls_0,cls_1, cls_2), dim=1)  # B,2,C
             cls = self.aggregate(cls).squeeze(dim=1)  # B,C
             cls = self.norm_all(cls)
+
             return cls
         else:
             for ind, blk in enumerate(self.blocks):
@@ -777,13 +864,31 @@ class Eva(nn.Module):
 
             x = self.norm(x)
             return x
+    def _compute_logits(self, feat: torch.Tensor) -> torch.Tensor:
+        """Return classification logits.
+
+        - Default: linear head(feat)
+        - If PROXY_ANCHOR_ON: cosine logits with shared proxy (head.weight)
+        """
+        if (not self.use_cosine_logits) or (not isinstance(self.head, nn.Linear)):
+            return self.head(feat)
+
+        # cosine classifier: s * cos(theta)
+        feat_f = feat.float()
+        w_f = self.head.weight.float()
+        feat_n = F.normalize(feat_f, dim=1, eps=1e-6)
+        w_n = F.normalize(w_f, dim=1, eps=1e-6)
+        logits = self.cosine_scale * F.linear(feat_n, w_n)  # [B,C]
+        return logits.to(dtype=feat.dtype)
+    
 
     def forward_head(self, x, pre_logits: bool = False):
         if self.global_pool:
             x = x[:, self.num_prefix_tokens:].mean(dim=1) if self.global_pool == 'avg' else x[:, 0]
         x = self.fc_norm(x)
         x = self.head_drop(x)
-        return x if pre_logits else self.head(x)
+        # return x if pre_logits else self.head(x)
+        return x if pre_logits else self._compute_logits(x)
 
     def forward(self, x, pids=None, text=None):
         feat = self.forward_features(x, pids=pids, text=text)
@@ -791,7 +896,8 @@ class Eva(nn.Module):
         if self.add_text:
                 if not self.training:
                     return feat
-                cls_score = self.head(feat)
+                # cls_score = self.head(feat)
+                cls_score = self._compute_logits(feat)
                 return cls_score, feat
 
             # 原始 EVA：走 timm 默认 head

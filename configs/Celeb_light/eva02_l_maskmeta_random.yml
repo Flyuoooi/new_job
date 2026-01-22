@@ -1,6 +1,6 @@
 MODEL:
-  TYPE:
-  NAME: eva02_l_text
+  TYPE: 
+  NAME: eva02_l
   PRETRAIN_PATH: '/home/jin/code/MADE/weights/eva02_large_patch14_clip_224/open_clip_model.safetensors'
   META_DIMS: [ 105, ]
   METRIC_LOSS_TYPE: 'triplet'
@@ -8,8 +8,8 @@ MODEL:
   IF_WITH_CENTER: 'no'
   NO_MARGIN: True
   DEVICE_ID: ('0')
-  ADD_META: False
   MASK_META: False
+  ADD_META: False
   DIST_TRAIN: False
   ADD_TEXT: True
   TEXT_DIMS: [ 512, ]
@@ -18,28 +18,17 @@ MODEL:
     CLIP_NAME: ''
     N_CTX: 32
     ENABLE_MASK: True
-    ATTN_MASK_RATIO: 0.0
+    ATTN_MASK_RATIO: 0.5
     ENABLE_RESID_PORT: False
     TEMP: 0.07
-    ITC_W: 0.01
+    ITC_W: 0.005
     RESID_W: 0.0
     ORTH_W: 0.0
-    PROXY_GATE_ON: True
-    PROXY_KEEP_RATIO: 0.5
-    PROXY_GATE_TEMP: 1.0
-    PROXY_GATE_MIN: 0.0
-    PROXY_GATE_APPLY: "t1,t2"
-    PROXY_DETACH_PROXY: True
-    PROXY_DETACH_SCORE: False
-    PROXY_ANCHOR_ON: True
-    PROXY_ANCHOR_W: 0.00
-    PROXY_ANCHOR_ALPHA: 16.0
-    PROXY_ANCHOR_DELTA: 0.10
 
 DATA:
   IMG_HEIGHT: 224
   IMG_WIDTH: 224
-  DATASET: 'prcc'
+  DATASET: 'celeb_light'
   RANDOM_NOISE: False
   AUX_INFO: False
 
@@ -60,6 +49,6 @@ TEST:
   WEIGHT: ''
   TYPE: 'image_only'
   FEAT_NORM: 'yes'
-OUTPUT_DIR: '../MADE/logs/prcc/text_proxy'
+OUTPUT_DIR: '../MADE/logs/celeb_light/text'
 
 

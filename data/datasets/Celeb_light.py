@@ -261,6 +261,16 @@ class Celeb_light(object):
         self.num_query_imgs = num_query_imgs
         self.pid2clothes = pid2clothes
 
+    # def _check_before_run(self):
+    #     """Check if all files are available before going deeper"""
+    #     if not osp.exists(self.dataset_dir):
+    #         raise RuntimeError("'{}' is not available".format(self.dataset_dir))
+    #     if not osp.exists(self.train_dir):
+    #         raise RuntimeError("'{}' is not available".format(self.train_dir))
+    #     if not osp.exists(self.query_dir):
+    #         raise RuntimeError("'{}' is not available".format(self.query_dir))
+    #     if not osp.exists(self.gallery_dir):
+    #         raise RuntimeError("'{}' is not available".format(self.gallery_dir))
     def _check_before_run(self):
         """Check if all files are available before going deeper"""
         if not osp.exists(self.dataset_dir):
@@ -271,6 +281,13 @@ class Celeb_light(object):
             raise RuntimeError("'{}' is not available".format(self.query_dir))
         if not osp.exists(self.gallery_dir):
             raise RuntimeError("'{}' is not available".format(self.gallery_dir))
+
+        # 只有 aux_info=True 才要求 meta 文件存在
+        if self.aux_info:
+            meta_path = os.path.join(self.dataset_dir, self.meta_dir)
+            if not osp.exists(meta_path):
+                raise RuntimeError(f"aux_info=True but meta file not found: {meta_path}")
+
 
     def _process_dir_train(self, dir_path):
         img_paths = glob.glob(osp.join(dir_path, '*.jpg'))
@@ -332,6 +349,7 @@ class Celeb_light(object):
         gallery_img_paths = glob.glob(osp.join(gallery_path, '*.jpg'))
         query_img_paths.sort()
         gallery_img_paths.sort()
+
         pattern1 = re.compile(r'(\d+)_(\d+)_(\d+)')
         pattern2 = re.compile(r'(\w+)_')
 
@@ -343,61 +361,61 @@ class Celeb_light(object):
             clothes_id = pattern2.search(img_path).group(1)
             pid_container.add(pid)
             clothes_container.add(clothes_id)
+
         for img_path in gallery_img_paths:
             pid, _, _ = map(int, pattern1.search(img_path).groups())
             clothes_id = pattern2.search(img_path).group(1)
             pid_container.add(pid)
             clothes_container.add(clothes_id)
+
         pid_container = sorted(pid_container)
         clothes_container = sorted(clothes_container)
-        
-        # 修改3：增加 aux_info 判断，避免无文件时报错
-        imgdir2attribute = {}
-        if self.aux_info:
-            with open(os.path.join(self.dataset_dir, self.meta_dir), 'r') as f:
-                for line in f:
-                    imgdir, attribute_id, is_present = line.split()
-                    if imgdir not in imgdir2attribute:
-                        imgdir2attribute[imgdir] = [0 for i in range(self.meta_dims)]
-                    imgdir2attribute[imgdir][int(attribute_id)] = int(is_present)
 
-        pid2label = {pid:label for label, pid in enumerate(pid_container)}
-        clothes2label = {clothes_id:label for label, clothes_id in enumerate(clothes_container)}
-
+        clothes2label = {clothes_id: label for label, clothes_id in enumerate(clothes_container)}
         num_pids = len(pid_container)
         num_clothes = len(clothes_container)
 
+        # ✅ PRCC 对齐：aux_info 才读 meta；并对 meta_dims 越界保护
+        imgdir2attribute = None
+        if self.aux_info:
+            imgdir2attribute = {}
+            meta_path = os.path.join(self.dataset_dir, self.meta_dir)
+            with open(meta_path, 'r') as f:
+                for line in f:
+                    imgdir, attribute_id, is_present = line.split()
+                    aid = int(attribute_id)
+                    if imgdir not in imgdir2attribute:
+                        imgdir2attribute[imgdir] = [0 for _ in range(self.meta_dims)]
+                    if aid >= self.meta_dims:
+                        continue
+                    imgdir2attribute[imgdir][aid] = int(is_present)
+
         query_dataset = []
         gallery_dataset = []
-        # images_info_query = [] # 删除：未使用的变量
-        # images_info_gallery = [] # 删除：未使用的变量
-        
+
+        # ✅ 关键修复：Celeb-reID-light 没有“真实多摄像头”意义上的 camid
+        # Market1501-style eval 会过滤同 pid 同 cam 的正样本，导致 num_valid_q==0。
+        # 解决：强制 query camid=0，gallery camid=1，避免正样本被 same-cam filter 全删光。
         for img_path in query_img_paths:
-            pid, _, camid = map(int, pattern1.search(img_path).groups())
-            clothes_id = pattern2.search(img_path).group(1)
-            # camid -= 1 # index starts from 0
-            clothes_id = clothes2label[clothes_id]
-            
-            # 修改4：安全的 append 逻辑
+            pid, _, _ = map(int, pattern1.search(img_path).groups())
+            clothes_key = pattern2.search(img_path).group(1)
+            clothes_id = clothes2label[clothes_key]
+            camid = 0  # force query camid
             if self.aux_info:
                 query_dataset.append((img_path, pid, camid, clothes_id, imgdir2attribute[img_path]))
-                # images_info_query.append({'attributes': imgdir2attribute[img_path]})
             else:
                 query_dataset.append((img_path, pid, camid, clothes_id))
 
         for img_path in gallery_img_paths:
-            pid, _, camid = map(int, pattern1.search(img_path).groups())
-            clothes_id = pattern2.search(img_path).group(1)
-            # camid -= 1 # index starts from 0
-            clothes_id = clothes2label[clothes_id]
-            
-            # 修改5：安全的 append 逻辑
+            pid, _, _ = map(int, pattern1.search(img_path).groups())
+            clothes_key = pattern2.search(img_path).group(1)
+            clothes_id = clothes2label[clothes_key]
+            camid = 1  # force gallery camid
             if self.aux_info:
                 gallery_dataset.append((img_path, pid, camid, clothes_id, imgdir2attribute[img_path]))
-                # images_info_gallery.append({'attributes': imgdir2attribute[img_path]})
             else:
                 gallery_dataset.append((img_path, pid, camid, clothes_id))
-        
+
         num_imgs_query = len(query_dataset)
         num_imgs_gallery = len(gallery_dataset)
 

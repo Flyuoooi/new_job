@@ -14,27 +14,13 @@ MODEL:
   ADD_TEXT: True
   TEXT_DIMS: [ 512, ]
   TEXT:
-    METHOD: "cocoop"
     CLIP_NAME: ''
-    N_CTX: 32
-    ENABLE_MASK: True
-    ATTN_MASK_RATIO: 0.0
-    ENABLE_RESID_PORT: False
+    N_CTX: 16
     TEMP: 0.07
-    ITC_W: 0.01
-    RESID_W: 0.0
-    ORTH_W: 0.0
-    PROXY_GATE_ON: True
-    PROXY_KEEP_RATIO: 0.5
-    PROXY_GATE_TEMP: 1.0
-    PROXY_GATE_MIN: 0.0
-    PROXY_GATE_APPLY: "t1,t2"
-    PROXY_DETACH_PROXY: True
-    PROXY_DETACH_SCORE: False
-    PROXY_ANCHOR_ON: True
-    PROXY_ANCHOR_W: 0.00
-    PROXY_ANCHOR_ALPHA: 16.0
-    PROXY_ANCHOR_DELTA: 0.10
+    ATTN_MASK_RATIO: 0.25
+    ITC_W: 0.05
+    RESID_W: 0.5
+    ORTH_W: 0.05
 
 DATA:
   IMG_HEIGHT: 224
@@ -60,6 +46,7 @@ TEST:
   WEIGHT: ''
   TYPE: 'image_only'
   FEAT_NORM: 'yes'
-OUTPUT_DIR: '../MADE/logs/prcc/text_proxy'
+  RERANKING: False
+OUTPUT_DIR: '../MADE/logs'
 
 
